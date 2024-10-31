@@ -1,0 +1,1 @@
+C:\Users\rasvi\Desktop\MIEI\Mestrado\5ºANO\1º\ SEMESTRE\PCLT\Praticas\Proj_rust\Rust-project\workspace\target\debug\workspace.exe: C:\Users\rasvi\Desktop\MIEI\Mestrado\5ºANO\1º\ SEMESTRE\PCLT\Praticas\Proj_rust\Rust-project\workspace\src\main.rs
