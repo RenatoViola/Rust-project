@@ -2,7 +2,7 @@ use rand::Rng;
 use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -56,9 +56,16 @@ impl Bakery {
     ) {
         // Collect results from each worker thread
         let mut worker_stats = vec![0; 6]; // Initialize a Vec of size 6 with all elements set to 0
+        let mut best_worker = 10; // arbitrary value for a worker id that exists
+        let mut current_best_sales = 0;
         for handle in handles {
             let (id, portions_sold) = handle.join().unwrap();
             worker_stats[id] = portions_sold;
+
+            if portions_sold > current_best_sales {
+                best_worker = id;
+                current_best_sales = portions_sold;
+            }
         }
 
         let portions_sold: usize = worker_stats.iter().sum();
@@ -67,6 +74,20 @@ impl Bakery {
             let cakes = cakes.lock().unwrap();
             cakes.iter().sum::<usize>()
         };
+
+        if portions_left % 6 == 0 {
+            println!(
+                "Everyone takes {} portions home today.",
+                (portions_left / 6)
+            );
+        } else {
+            println!(
+                "{} was the best worker, so he's taking {} portions home today. Everyone else takes {} portions of cake.",
+                best_worker,
+                (portions_left / 6 + portions_left % 6),
+                (portions_left / 6)
+            );
+        }
 
         println!(
             "Portions sold for the day: {} | Portions left for the day: {}",
@@ -113,7 +134,7 @@ struct Worker {
 
 impl Worker {
     fn new(id: usize) -> Self {
-        let prioritize = if id == 0 || id == 1 { false } else { true }; // workers 0 and 1 prioritize regular customers unlike the rest
+        let prioritize = !(id == 0 || id == 1); // workers 0 and 1 prioritize regular customers unlike the rest
 
         Self {
             id,
@@ -233,10 +254,6 @@ impl Worker {
                     self.portions_sold += ordered_portions;
                     thread::sleep(service_duration);
                 } else {
-                    println!(
-                        "{}Worker {} has no customer to serve.{}",
-                        color, self.id, reset
-                    );
                     thread::sleep(Duration::from_millis(500));
                     continue;
                 }
@@ -273,14 +290,15 @@ fn cake_production(is_morning: Arc<Mutex<bool>>, cakes: Arc<Mutex<VecDeque<usize
             let n_cakes = {
                 let mut cakes = cakes.lock().unwrap();
                 println!(
-                    "Currently have {} cakes from the morning in stack.",
+                    "Currently have {} cakes from the morning in stack",
                     cakes.len()
                 );
-                *cakes = VecDeque::from(vec![6; 50]); // Afternoon stack of 50 cakes
+                let mut afternoon_cakes: VecDeque<usize> = VecDeque::from(vec![6; 50]);
+                cakes.append(&mut afternoon_cakes);
                 cakes.len()
             };
             println!(
-                "It is the afternoon. Stack has {} cakes available.",
+                "Starting AFTERNOON period, 50 more cakes available. Currently have {} cakes in stack",
                 n_cakes
             );
             break; // Exit loop once afternoon stack is set
@@ -332,9 +350,9 @@ fn main() {
     // Shared state to control bakery's open/close status
     let num_days = 1;
     for day in 1..=num_days {
-        let regular_queue = Arc::new(Mutex::new(VecDeque::<Client>::new()));
-        let priority_queue = Arc::new(Mutex::new(VecDeque::<Client>::new()));
-        let cakes = Arc::new(Mutex::new(VecDeque::<usize>::with_capacity(50)));
+        let regular_queue = Arc::new(Mutex::new(VecDeque::<Client>::with_capacity(100)));
+        let priority_queue = Arc::new(Mutex::new(VecDeque::<Client>::with_capacity(20)));
+        let cakes = Arc::new(Mutex::new(VecDeque::<usize>::with_capacity(100)));
 
         println!("Starting day {}", day);
 
@@ -367,7 +385,7 @@ fn main() {
         let regular_queue_clone = Arc::clone(&regular_queue);
         let priority_queue_clone = Arc::clone(&priority_queue);
         let customer_handle = thread::spawn(move || {
-            // thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(500));
             customer_arrival(is_open_clone, regular_queue_clone, priority_queue_clone);
         });
 
