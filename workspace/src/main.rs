@@ -3,7 +3,7 @@ use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 struct DailyStats {
@@ -18,57 +18,81 @@ struct Bakery {
 
 impl Bakery {
     fn operate(
-        &self,
+        &mut self,
         is_open: Arc<Mutex<bool>>,
         regular_queue: Arc<Mutex<VecDeque<Client>>>,
         priority_queue: Arc<Mutex<VecDeque<Client>>>,
         cakes: Arc<Mutex<VecDeque<usize>>>,
     ) {
-        let mut worker_handles = vec![];
+        let mut handles = vec![];
 
         // Launch 6 worker threads
-        for worker_id in 0..6 {
+        for id in 0..6 {
             let is_open_clone = Arc::clone(&is_open);
             let regular_queue_clone = Arc::clone(&regular_queue);
             let priority_queue_clone = Arc::clone(&priority_queue);
             let cakes_clone = Arc::clone(&cakes);
 
             let handle = thread::spawn(move || {
-                let mut portions_sold = 0;
-
-                while *is_open_clone.lock().unwrap() {
-                    portions_sold += 1;
-                    thread::sleep(Duration::from_millis(500));
-                }
-
-                (worker_id, portions_sold)
+                let mut worker = Worker::new(id);
+                worker.service(
+                    is_open_clone,
+                    regular_queue_clone,
+                    priority_queue_clone,
+                    cakes_clone,
+                )
             });
 
-            worker_handles.push(handle);
+            handles.push(handle);
         }
 
+        self.gather_daily_stats(cakes, handles);
+    }
+
+    fn gather_daily_stats(
+        &mut self,
+        cakes: Arc<Mutex<VecDeque<usize>>>,
+        handles: Vec<JoinHandle<(usize, usize)>>,
+    ) {
         // Collect results from each worker thread
         let mut worker_stats = vec![0; 6]; // Initialize a Vec of size 6 with all elements set to 0
-        for handle in worker_handles {
+        for handle in handles {
             let (id, portions_sold) = handle.join().unwrap();
             worker_stats[id] = portions_sold;
         }
 
+        let portions_sold: usize = worker_stats.iter().sum();
+
+        let portions_left = {
+            let cakes = cakes.lock().unwrap();
+            cakes.iter().sum::<usize>()
+        };
+
+        println!(
+            "Portions sold for the day: {} | Portions left for the day: {}",
+            portions_sold, portions_left
+        );
         for (id, sold) in worker_stats.iter().enumerate() {
-            println!("Worker with id {} sold {} portions!", id, sold);
+            println!("Worker {} sold {} portions today.", id, sold);
         }
+
+        self.stats.push(DailyStats {
+            portions_sold,
+            portions_left,
+            worker_stats,
+        });
     }
 }
 
 #[derive(Clone, Copy)]
 struct Client {
-    id: u32,
+    id: usize,
     is_priority: bool,
     portions_ordered: usize,
 }
 
 impl Client {
-    fn new(id: u32) -> Self {
+    fn new(id: usize) -> Self {
         let mut rng = rand::thread_rng();
         let is_priority = rng.gen_bool(0.2);
         let portions_ordered = rng.gen_range(1..=18);
@@ -80,41 +104,178 @@ impl Client {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Worker {
-    id: u32,
-    is_priority: bool,
+    id: usize,
+    prioritize: bool,
     portions_sold: usize,
-    client: Option<Client>,
 }
 
 impl Worker {
-    fn new(id: u32, is_priority: bool) -> Self {
+    fn new(id: usize) -> Self {
+        let prioritize = if id == 0 || id == 1 { false } else { true }; // workers 0 and 1 prioritize regular customers unlike the rest
+
         Self {
             id,
-            is_priority,
+            prioritize,
             portions_sold: 0,
-            client: None,
         }
+    }
+
+    fn fetch_client(
+        &self,
+        regular_queue: Arc<Mutex<VecDeque<Client>>>,
+        priority_queue: Arc<Mutex<VecDeque<Client>>>,
+    ) -> Option<Client> {
+        // check if there are priority clients waiting
+        let mut queue = if self.prioritize {
+            // prioritizes priority costumers
+            let priority_queue = priority_queue.lock().unwrap();
+            if !priority_queue.is_empty() {
+                priority_queue
+            } else {
+                regular_queue.lock().unwrap()
+            }
+        } else {
+            // prioritizes regular costumers -> inverse behaviour
+            let regular_queue = regular_queue.lock().unwrap();
+            if !regular_queue.is_empty() {
+                regular_queue
+            } else {
+                priority_queue.lock().unwrap()
+            }
+        };
+
+        queue.pop_front()
+    }
+
+    fn service(
+        &mut self,
+        is_open: Arc<Mutex<bool>>,
+        regular_queue: Arc<Mutex<VecDeque<Client>>>,
+        priority_queue: Arc<Mutex<VecDeque<Client>>>,
+        cakes: Arc<Mutex<VecDeque<usize>>>,
+    ) -> (usize, usize) {
+        let color = match self.id {
+            0 => "\x1b[31m", // Red
+            1 => "\x1b[32m", // Green
+            2 => "\x1b[33m", // Yellow
+            3 => "\x1b[34m", // Blue
+            4 => "\x1b[35m", // Magenta
+            5 => "\x1b[36m", // Cyan
+            _ => "\x1b[0m",  // Default
+        };
+        let reset = "\x1b[0m";
+
+        loop {
+            if *is_open.lock().unwrap() {
+                let client = self.fetch_client(regular_queue.clone(), priority_queue.clone());
+
+                if let Some(client) = client {
+                    println!(
+                        "{}Worker {} is serving client {}{}",
+                        color, self.id, client.id, reset
+                    );
+
+                    let ordered_portions = client.portions_ordered;
+                    let mut full_cakes = ordered_portions / 6;
+                    let mut individual_portions = ordered_portions % 6;
+                    let service_time = full_cakes + individual_portions;
+                    let service_duration = Duration::from_secs((service_time).try_into().unwrap());
+                    {
+                        /*
+                         * lets start by verifying that we can fulfill the client's order
+                         * we try to get the first 3 cakes, since the max order are 3 cakes.
+                         * if we dont have 3 cakes left, we get the number of portions for the remainder
+                         */
+                        let mut cakes = cakes.lock().unwrap();
+                        let (slice1, slice2) = cakes.as_slices();
+                        let total_elements = slice1.len() + slice2.len();
+                        let available_portions: usize = if total_elements >= 3 {
+                            // Sum the first 3 elements across slice1 and slice2
+                            slice1.iter().chain(slice2.iter()).take(3).sum()
+                        } else {
+                            // Sum all available elements if fewer than 3
+                            slice1.iter().chain(slice2.iter()).sum()
+                        };
+
+                        if available_portions < ordered_portions {
+                            // go to the next customer, as we don't have enough cake for the current one
+                            println!("{}Cannot serve client {} | Requested {} portions, only {} are available{}", color, client.id, ordered_portions, available_portions, reset);
+                            continue;
+                        } else {
+                            println!(
+                                "{}Worker {} takes {} seconds to serve {} pieces of cake to client {}{}",
+                                color, self.id, service_time, ordered_portions, client.id, reset
+                            );
+
+                            // lets start by removing as many complete cakes as possible
+                            // this is done to save the clients time
+                            while full_cakes > 0 {
+                                cakes.pop_back();
+                                full_cakes -= 1;
+                            }
+
+                            //now that we got the complete cakes, we get the remaining pieces
+                            while individual_portions > 0 {
+                                if let Some(cake) = cakes.front_mut() {
+                                    if *cake <= individual_portions {
+                                        individual_portions -= *cake;
+                                        cakes.pop_front();
+                                    } else {
+                                        *cake -= individual_portions;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.portions_sold += ordered_portions;
+                    thread::sleep(service_duration);
+                } else {
+                    println!(
+                        "{}Worker {} has no customer to serve.{}",
+                        color, self.id, reset
+                    );
+                    thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+            } else {
+                println!(
+                    "{}Worker {} is done for the day. Sold {} portions{}",
+                    color, self.id, self.portions_sold, reset
+                );
+                break;
+            }
+        }
+        (self.id, self.portions_sold)
     }
 }
 
 fn cake_production(is_morning: Arc<Mutex<bool>>, cakes: Arc<Mutex<VecDeque<usize>>>) {
+    {
+        let mut cakes = cakes.lock().unwrap();
+        *cakes = VecDeque::from(vec![6; 10]);
+    }; // have 10 cakes initially
+
     loop {
         // Check if it's morning
         if *is_morning.lock().unwrap() {
             // Simulate producing one cake with a delay
-            thread::sleep(Duration::from_millis(500));
-            let n_cakes = {
+            thread::sleep(Duration::from_millis(400));
+            let _n_cakes = {
                 let mut cakes = cakes.lock().unwrap();
                 cakes.push_back(6); // Each cake starts with 6 portions
                 cakes.len()
             };
-            println!("Baked a cake. Currently have {} cakes in stack.", n_cakes);
         } else {
             // Afternoon production: reset with a fixed number of cakes
             let n_cakes = {
                 let mut cakes = cakes.lock().unwrap();
+                println!(
+                    "Currently have {} cakes from the morning in stack.",
+                    cakes.len()
+                );
                 *cakes = VecDeque::from(vec![6; 50]); // Afternoon stack of 50 cakes
                 cakes.len()
             };
@@ -145,16 +306,17 @@ fn customer_arrival(
                 };
                 queue.push_back(client);
                 println!(
-                    "Customer with id {} and priority {} arrived. | Size of corresponding queue: {}",
-                    id,
+                    "Customer with id {} and priority {} arrived, wanting {} portions | Size of corresponding queue: {}",
+                    client.id,
                     client.is_priority,
+                    client.portions_ordered,
                     queue.len()
                 );
             }
             id += 1;
 
             // Simulate a short delay to avoid a busy loop
-            let normal = Normal::new(2.0, 0.5).unwrap();
+            let normal = Normal::new(1.0, 0.1).unwrap();
             let arrival_time = (normal.sample(&mut rand::thread_rng())).to_u64().unwrap();
             thread::sleep(Duration::from_secs(arrival_time));
         } else {
@@ -176,7 +338,7 @@ fn main() {
 
         println!("Starting day {}", day);
 
-        // Reset the `open` flag at the beginning of each day
+        // Reset the "open" flag at the beginning of each day
         let is_open = Arc::new(Mutex::new(true));
         let is_morning = Arc::new(Mutex::new(true));
 
@@ -184,13 +346,13 @@ fn main() {
         let is_open_timer = Arc::clone(&is_open);
         let is_morning_timer = Arc::clone(&is_morning);
         thread::spawn(move || {
-            thread::sleep(Duration::from_secs(5)); // Simulate 5 hours with a shorter duration
+            thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration
             {
                 let mut is_morning = is_morning_timer.lock().unwrap();
                 *is_morning = false; // now it's afternoon
                 println!("5 hours have passed. It is the afternoon for day {}.", day);
             }
-            thread::sleep(Duration::from_secs(5)); // Simulate 5 hours with a shorter duration, for a total of 10 hours
+            thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration, for a total of 10 hours
             let mut is_open = is_open_timer.lock().unwrap();
             *is_open = false;
             println!("10 hours have passed. Closing the bakery for day {}.", day);
@@ -205,6 +367,7 @@ fn main() {
         let regular_queue_clone = Arc::clone(&regular_queue);
         let priority_queue_clone = Arc::clone(&priority_queue);
         let customer_handle = thread::spawn(move || {
+            // thread::sleep(Duration::from_secs(1));
             customer_arrival(is_open_clone, regular_queue_clone, priority_queue_clone);
         });
 
@@ -215,6 +378,6 @@ fn main() {
         customer_handle.join().unwrap();
 
         // Small interval to simulate break between days
-        thread::sleep(Duration::from_secs(5));
+        // thread::sleep(Duration::from_secs(1));
     }
 }
