@@ -3,7 +3,7 @@ use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::collections::VecDeque;
 use std::io;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ struct Bakery {
 impl Bakery {
     fn operate(
         &mut self,
-        is_open: Arc<Mutex<bool>>,
+        is_open: Arc<RwLock<bool>>,
         customer_queues: Arc<(Mutex<CustomerQueues>, Condvar)>,
         cakes: Arc<Mutex<VecDeque<usize>>>,
     ) {
@@ -201,14 +201,14 @@ impl Worker {
 
     fn fetch_client(
         &self,
-        is_open: Arc<Mutex<bool>>,
+        is_open: Arc<RwLock<bool>>,
         customer_queues: Arc<(Mutex<CustomerQueues>, Condvar)>,
     ) -> Option<Client> {
         let (queues_lock, cvar) = &*customer_queues;
         // Lock the customer queues
         let mut queues = queues_lock.lock().unwrap();
         // Wait until there is a client in either queue
-        while *is_open.lock().unwrap()
+        while *is_open.read().unwrap()
             && queues.priority_queue.is_empty()
             && queues.regular_queue.is_empty()
         {
@@ -234,7 +234,7 @@ impl Worker {
 
     fn service(
         &mut self,
-        is_open: Arc<Mutex<bool>>,
+        is_open: Arc<RwLock<bool>>,
         customer_queues: Arc<(Mutex<CustomerQueues>, Condvar)>,
         cakes: Arc<Mutex<VecDeque<usize>>>,
     ) -> (usize, usize) {
@@ -261,7 +261,7 @@ impl Worker {
             );
         }
 
-        while *is_open.lock().unwrap() {
+        while *is_open.read().unwrap() {
             let client = self.fetch_client(Arc::clone(&is_open), Arc::clone(&customer_queues));
 
             if let Some(client) = client {
@@ -349,8 +349,8 @@ impl Worker {
     }
 }
 
-fn cake_production(is_morning: Arc<Mutex<bool>>, cakes: Arc<Mutex<VecDeque<usize>>>) {
-    while *is_morning.lock().unwrap() {
+fn cake_production(is_morning: Arc<RwLock<bool>>, cakes: Arc<Mutex<VecDeque<usize>>>) {
+    while *is_morning.read().unwrap() {
         // Simulate producing one cake with a delay
         thread::sleep(Duration::from_millis(400));
         let mut cakes = cakes.lock().unwrap();
@@ -368,40 +368,57 @@ fn cake_production(is_morning: Arc<Mutex<bool>>, cakes: Arc<Mutex<VecDeque<usize
         cakes.len()
     };
     println!(
-        "Starting AFTERNOON period, 50 more cakes available. Currently have {} cakes in stack",
+        "Starting afternoon period, 50 more cakes available. Currently have {} cakes in stack",
         n_cakes
     );
 }
 
 fn customer_arrival(
-    is_open: Arc<Mutex<bool>>,
+    is_open: Arc<RwLock<bool>>,
     customer_queues: Arc<(Mutex<CustomerQueues>, Condvar)>,
 ) {
     let mut id = 0;
 
-    while *is_open.lock().unwrap() {
+    while *is_open.read().unwrap() {
         let client = Client::new(id);
         let (queues, cvar) = &*customer_queues;
-        let mut queues = queues.lock().unwrap();
-        if client.is_priority {
-            println!(
-                "Priority customer with id {} arrived, wanting {} cake portions",
-                client.id, client.portions_ordered
-            );
-            queues.priority_queue.push_back(client);
-        } else {
-            println!(
-                "Customer with id {} arrived, wanting {} cake portions",
-                client.id, client.portions_ordered
-            );
-            queues.regular_queue.push_back(client);
+        {
+            let mut queues = queues.lock().unwrap();
+            if client.is_priority {
+                println!(
+                    "Priority customer with id {} arrived, wanting {} cake portions",
+                    client.id, client.portions_ordered
+                );
+                queues.priority_queue.push_back(client);
+            } else {
+                println!(
+                    "Customer with id {} arrived, wanting {} cake portions",
+                    client.id, client.portions_ordered
+                );
+                queues.regular_queue.push_back(client);
+            }
+            cvar.notify_one();
         }
-        cvar.notify_one();
         id += 1;
         let normal = Normal::new(1.0, 0.1).unwrap();
         let arrival_time = (normal.sample(&mut rand::thread_rng())).to_u64().unwrap();
         thread::sleep(Duration::from_secs(arrival_time));
     }
+    customer_queues.1.notify_all(); // Signal to all waiting threads that the day is over
+}
+
+fn day_time_logic(is_open: Arc<RwLock<bool>>, is_morning: Arc<RwLock<bool>>) {
+    // Start the timer thread for "10 hours" (60 seconds for testing)
+    thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration
+    {
+        let mut is_morning = is_morning.write().unwrap();
+        *is_morning = false; // now it's afternoon
+        println!("5 hours have passed. It is the afternoon.");
+    }
+    thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration, for a total of 10 hours
+    let mut is_open = is_open.write().unwrap();
+    *is_open = false;
+    println!("10 hours have passed. Closing the bakery for the day.");
 }
 
 fn main() {
@@ -434,23 +451,14 @@ fn main() {
         println!("------------------------------------------START OF DAY {}-------------------------------------------", day);
 
         // Reset the "open" flag at the beginning of each day
-        let is_open = Arc::new(Mutex::new(true));
-        let is_morning = Arc::new(Mutex::new(true));
+        let is_open = Arc::new(RwLock::new(true));
+        let is_morning = Arc::new(RwLock::new(true));
 
-        // Start the timer thread for "10 hours" (60 seconds for testing)
         let is_open_timer = Arc::clone(&is_open);
         let is_morning_timer = Arc::clone(&is_morning);
+        
         thread::spawn(move || {
-            thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration
-            {
-                let mut is_morning = is_morning_timer.lock().unwrap();
-                *is_morning = false; // now it's afternoon
-                println!("5 hours have passed. It is the afternoon for day {}.", day);
-            }
-            thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration, for a total of 10 hours
-            let mut is_open = is_open_timer.lock().unwrap();
-            *is_open = false;
-            println!("10 hours have passed. Closing the bakery for day {}.", day);
+            day_time_logic(is_open_timer, is_morning_timer);
         });
 
         let cakes_clone = Arc::clone(&cakes);
