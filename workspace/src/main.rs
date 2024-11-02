@@ -2,10 +2,12 @@ use rand::Rng;
 use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::collections::VecDeque;
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[allow(dead_code)]
 struct DailyStats {
     portions_sold: usize,
     portions_left: usize,
@@ -101,10 +103,68 @@ impl Bakery {
         }
     }
 
-    fn general_stats(&self) {}
+    fn general_stats(&self) {
+        // Calculate the best business day (day with the most portions sold)
+        let mut best_day_index = 0;
+        let mut max_portions_sold = 0;
+        for (index, daily_stat) in self.stats.iter().enumerate() {
+            if daily_stat.portions_sold > max_portions_sold {
+                max_portions_sold = daily_stat.portions_sold;
+                best_day_index = index;
+            }
+        }
+
+        // Calculate the best worker (most portions sold on average across all days)
+        let num_workers = 6;
+        let mut total_worker_sales = vec![0; num_workers];
+
+        // Accumulate portions sold by each worker across all days
+        for daily_stat in &self.stats {
+            for (worker_id, &portions_sold) in daily_stat.worker_stats.iter().enumerate() {
+                total_worker_sales[worker_id] += portions_sold;
+            }
+        }
+
+        // Calculate the best worker by average portions sold
+        let mut best_worker = 0;
+        let mut highest_average = 0;
+        let num_days = self.stats.len();
+        for (worker_id, &total_sold) in total_worker_sales.iter().enumerate() {
+            let average_sold = total_sold / num_days;
+            if average_sold > highest_average {
+                highest_average = average_sold;
+                best_worker = worker_id;
+            }
+        }
+
+        println!("------------------------------------------FINAL STATS-------------------------------------------");
+        println!("{} days went by", self.stats.len());
+
+        for (index, daily_stat) in self.stats.iter().enumerate() {
+            println!("In day {}:", index + 1);
+            println!(
+                " General stats: {} portions sold | {} portions left",
+                daily_stat.portions_sold, daily_stat.portions_left
+            );
+            print!(" Worker stats: |");
+            for sold in &daily_stat.worker_stats {
+                print!(" {} |", sold);
+            }
+            println!("\n");
+        }
+
+        println!(
+            "Best business day was: day {} with {} portions sold",
+            best_day_index + 1, // Adding 1 to display as a 1-based day number
+            max_portions_sold
+        );
+        println!(
+            "Best worker was: worker {} with an average of {} portions sold per day.",
+            best_worker, highest_average
+        );
+    }
 }
 
-#[derive(Clone)]
 struct Client {
     id: usize,
     is_priority: bool,
@@ -124,7 +184,6 @@ impl Client {
     }
 }
 
-#[derive(Clone)]
 struct Worker {
     id: usize,
     prioritize: bool,
@@ -361,7 +420,7 @@ fn customer_arrival(
             let arrival_time = (normal.sample(&mut rand::thread_rng())).to_u64().unwrap();
             thread::sleep(Duration::from_secs(arrival_time));
         } else {
-            println!("Day has ended, no more customers are coming in");
+            // println!("Day has ended, no more customers are coming in");
             break;
         }
     }
@@ -370,14 +429,20 @@ fn customer_arrival(
 fn main() {
     let mut bakery = Bakery { stats: Vec::new() };
 
-    // Shared state to control bakery's open/close status
-    let num_days = 2;
+    // from https://medium.com/@rohanbhatotiya/how-can-we-take-integers-as-an-input-in-rust-8f76ddf51010
+    let mut input = String::new();
+    println!("Enter the number of days to simulate.");
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read input");
+    let num_days: u32 = input.trim().parse().expect("Invalid input");
+
     for day in 1..=num_days {
         let regular_queue = Arc::new(Mutex::new(VecDeque::<Client>::with_capacity(100)));
         let priority_queue = Arc::new(Mutex::new(VecDeque::<Client>::with_capacity(20)));
         let cakes = Arc::new(Mutex::new(VecDeque::<usize>::with_capacity(100)));
 
-        println!("Starting day {}", day);
+        println!("------------------------------------------START OF DAY {}-------------------------------------------", day);
 
         // Reset the "open" flag at the beginning of each day
         let is_open = Arc::new(Mutex::new(true));
@@ -419,6 +484,8 @@ fn main() {
         customer_handle.join().unwrap();
 
         // Small interval to simulate break between days
-        thread::sleep(Duration::from_secs(2));
+        println!("------------------------------------------END OF DAY {}-------------------------------------------\n", day);
+        thread::sleep(Duration::from_secs(5));
     }
+    bakery.general_stats();
 }
