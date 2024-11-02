@@ -2,7 +2,7 @@ use rand::Rng;
 use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -75,37 +75,36 @@ impl Bakery {
             cakes.iter().sum::<usize>()
         };
 
-        if portions_left % 6 == 0 {
-            println!(
-                "Everyone takes {} portions home today.",
-                (portions_left / 6)
-            );
-        } else {
-            println!(
-                "{} was the best worker, so he's taking {} portions home today. Everyone else takes {} portions of cake.",
-                best_worker,
-                (portions_left / 6 + portions_left % 6),
-                (portions_left / 6)
-            );
-        }
-
-        println!(
-            "Portions sold for the day: {} | Portions left for the day: {}",
-            portions_sold, portions_left
-        );
-        for (id, sold) in worker_stats.iter().enumerate() {
-            println!("Worker {} sold {} portions today.", id, sold);
-        }
-
         self.stats.push(DailyStats {
             portions_sold,
             portions_left,
             worker_stats,
         });
+
+        println!(
+            "Portions sold for the day: {} | Portions left for the day: {}",
+            portions_sold, portions_left
+        );
+
+        let divided_portions = portions_left / 6;
+        let portions_remainder = portions_left % 6;
+        if portions_remainder == 0 {
+            println!(
+                "{} was the best worker and everyone takes {} portions home today.",
+                best_worker, divided_portions
+            );
+        } else {
+            println!(
+                "{} was the best worker, so he's taking {} portions home today. Everyone else takes {} portions of cake.",
+                best_worker, (divided_portions + portions_remainder), divided_portions
+            );
+        }
     }
+
+    fn general_stats(&self) {}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Client {
     id: usize,
     is_priority: bool,
@@ -166,7 +165,6 @@ impl Worker {
                 priority_queue.lock().unwrap()
             }
         };
-
         queue.pop_front()
     }
 
@@ -187,6 +185,18 @@ impl Worker {
             _ => "\x1b[0m",  // Default
         };
         let reset = "\x1b[0m";
+
+        if self.prioritize {
+            println!(
+                "{}Worker {} prioritizes priority customers over regular customers{}",
+                color, self.id, reset
+            );
+        } else {
+            println!(
+                "{}Worker {} prioritizes regular customers over priority customers{}",
+                color, self.id, reset
+            );
+        }
 
         loop {
             if *is_open.lock().unwrap() {
@@ -237,24 +247,40 @@ impl Worker {
                                 full_cakes -= 1;
                             }
 
-                            //now that we got the complete cakes, we get the remaining pieces
-                            while individual_portions > 0 {
-                                if let Some(cake) = cakes.front_mut() {
-                                    if *cake <= individual_portions {
-                                        individual_portions -= *cake;
-                                        cakes.pop_front();
-                                    } else {
-                                        *cake -= individual_portions;
-                                        break;
+                            if let Some(&prev_front_cake) = cakes.front() {
+                                //now that we got the complete cakes, we get the remaining pieces
+                                while individual_portions > 0 {
+                                    if let Some(cake) = cakes.front_mut() {
+                                        if *cake <= individual_portions {
+                                            individual_portions -= *cake;
+                                            cakes.pop_front();
+                                        } else {
+                                            *cake -= individual_portions;
+                                            break;
+                                        }
                                     }
                                 }
+
+                                if let Some(current_front_cake) = cakes.front() {
+                                    println!(
+                                        "{}Previous cake on top of stack was |{}|; After service, current cake on top of stack is |{}|{}",
+                                        color, prev_front_cake, current_front_cake, reset
+                                    );
+                                } else {
+                                    println!(
+                                        "{}Previous cake on top of stack was |{}|; After service, there is no cake in stack{}",
+                                        color, prev_front_cake, reset
+                                    );
+                                }
+                            } else {
+                                // Will only reach this case if order was only full cakes
                             }
                         }
                     }
                     self.portions_sold += ordered_portions;
                     thread::sleep(service_duration);
                 } else {
-                    thread::sleep(Duration::from_millis(500));
+                    thread::sleep(Duration::from_millis(1000));
                     continue;
                 }
             } else {
@@ -280,17 +306,14 @@ fn cake_production(is_morning: Arc<Mutex<bool>>, cakes: Arc<Mutex<VecDeque<usize
         if *is_morning.lock().unwrap() {
             // Simulate producing one cake with a delay
             thread::sleep(Duration::from_millis(400));
-            let _n_cakes = {
-                let mut cakes = cakes.lock().unwrap();
-                cakes.push_back(6); // Each cake starts with 6 portions
-                cakes.len()
-            };
+            let mut cakes = cakes.lock().unwrap();
+            cakes.push_back(6); // Each cake starts with 6 portions
         } else {
             // Afternoon production: reset with a fixed number of cakes
             let n_cakes = {
                 let mut cakes = cakes.lock().unwrap();
                 println!(
-                    "Currently have {} cakes from the morning in stack",
+                    "Done producing cakes for today. Have {} cakes from the morning in stack",
                     cakes.len()
                 );
                 let mut afternoon_cakes: VecDeque<usize> = VecDeque::from(vec![6; 50]);
@@ -318,27 +341,27 @@ fn customer_arrival(
             let client = Client::new(id);
             {
                 let mut queue = if client.is_priority {
+                    println!(
+                        "Priority customer with id {} arrived, wanting {} cake portions",
+                        client.id, client.portions_ordered
+                    );
                     priority_queue.lock().unwrap()
                 } else {
+                    println!(
+                        "Customer with id {} arrived, wanting {} cake portions",
+                        client.id, client.portions_ordered
+                    );
                     regular_queue.lock().unwrap()
                 };
                 queue.push_back(client);
-                println!(
-                    "Customer with id {} and priority {} arrived, wanting {} portions | Size of corresponding queue: {}",
-                    client.id,
-                    client.is_priority,
-                    client.portions_ordered,
-                    queue.len()
-                );
             }
             id += 1;
 
-            // Simulate a short delay to avoid a busy loop
             let normal = Normal::new(1.0, 0.1).unwrap();
             let arrival_time = (normal.sample(&mut rand::thread_rng())).to_u64().unwrap();
             thread::sleep(Duration::from_secs(arrival_time));
         } else {
-            println!("Day has ended, no more customers.");
+            println!("Day has ended, no more customers are coming in");
             break;
         }
     }
@@ -348,7 +371,7 @@ fn main() {
     let mut bakery = Bakery { stats: Vec::new() };
 
     // Shared state to control bakery's open/close status
-    let num_days = 1;
+    let num_days = 2;
     for day in 1..=num_days {
         let regular_queue = Arc::new(Mutex::new(VecDeque::<Client>::with_capacity(100)));
         let priority_queue = Arc::new(Mutex::new(VecDeque::<Client>::with_capacity(20)));
@@ -385,7 +408,7 @@ fn main() {
         let regular_queue_clone = Arc::clone(&regular_queue);
         let priority_queue_clone = Arc::clone(&priority_queue);
         let customer_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(200));
             customer_arrival(is_open_clone, regular_queue_clone, priority_queue_clone);
         });
 
@@ -396,6 +419,6 @@ fn main() {
         customer_handle.join().unwrap();
 
         // Small interval to simulate break between days
-        // thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(2));
     }
 }
