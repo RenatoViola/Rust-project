@@ -32,7 +32,7 @@ impl Bakery {
     ) {
         let mut handles = vec![];
 
-        // Launch 6 worker threads
+        // Each of the six workers operates in its own exclusive thread
         for id in 0..6 {
             let is_open_clone = Arc::clone(&is_open);
             let customer_queues_clone = Arc::clone(&customer_queues);
@@ -46,6 +46,7 @@ impl Bakery {
             handles.push(handle);
         }
 
+        // Collect the results from each worker and store them
         self.gather_daily_stats(cakes, handles);
     }
 
@@ -54,10 +55,10 @@ impl Bakery {
         cakes: Arc<Mutex<VecDeque<usize>>>,
         handles: Vec<JoinHandle<(usize, usize)>>,
     ) {
-        // Collect results from each worker thread
-        let mut worker_stats = vec![0; 6]; // Initialize a Vec of size 6 with all elements set to 0
-        let mut best_worker = 10; // arbitrary value for a worker id that exists
+        let mut worker_stats = vec![0; 6];
+        let mut best_worker = 10;
         let mut current_best_sales = 0;
+
         for handle in handles {
             let (id, portions_sold) = handle.join().unwrap();
             worker_stats[id] = portions_sold;
@@ -69,11 +70,7 @@ impl Bakery {
         }
 
         let portions_sold: usize = worker_stats.iter().sum();
-
-        let portions_left = {
-            let cakes = cakes.lock().unwrap();
-            cakes.iter().sum::<usize>()
-        };
+        let portions_left = cakes.lock().unwrap().iter().sum();
 
         self.stats.push(DailyStats {
             portions_sold,
@@ -90,51 +87,46 @@ impl Bakery {
         let portions_remainder = portions_left % 6;
         if portions_remainder == 0 {
             println!(
-                "{} was the best worker and everyone takes {} portions home today.",
+                "{} was the best worker and everyone takes {} portions home today",
                 best_worker, divided_portions
             );
         } else {
             println!(
-                "{} was the best worker, so he's taking {} portions home today. Everyone else takes {} portions of cake.",
+                "{} was the best worker, so he's taking {} portions home today. Everyone else takes {} portions of cake",
                 best_worker, (divided_portions + portions_remainder), divided_portions
             );
         }
     }
 
     fn general_stats(&self) {
-        // Calculate the best business day (day with the most portions sold)
         let mut best_day_index = 0;
-        let mut max_portions_sold = 0;
+        let mut most_portions_sold = 0;
         for (index, daily_stat) in self.stats.iter().enumerate() {
-            if daily_stat.portions_sold > max_portions_sold {
-                max_portions_sold = daily_stat.portions_sold;
+            if daily_stat.portions_sold > most_portions_sold {
+                most_portions_sold = daily_stat.portions_sold;
                 best_day_index = index;
             }
         }
 
-        // Calculate the best worker (most portions sold on average across all days)
-        let num_workers = 6;
-        let mut total_worker_sales = vec![0; num_workers];
-
-        // Accumulate portions sold by each worker across all days
-        for daily_stat in &self.stats {
-            for (worker_id, &portions_sold) in daily_stat.worker_stats.iter().enumerate() {
-                total_worker_sales[worker_id] += portions_sold;
+        // The best worker is the one who sold more portions on average, across all days
+        let mut total_worker_sales = vec![0; 6];
+        for daily_stats in &self.stats {
+            for (id, portions_sold) in daily_stats.worker_stats.iter().enumerate() {
+                total_worker_sales[id] += portions_sold;
             }
         }
-
-        // Calculate the best worker by average portions sold
         let mut best_worker = 0;
-        let mut highest_average = 0;
+        let mut best_average = 0;
         let num_days = self.stats.len();
-        for (worker_id, &total_sold) in total_worker_sales.iter().enumerate() {
+        for (id, &total_sold) in total_worker_sales.iter().enumerate() {
             let average_sold = total_sold / num_days;
-            if average_sold > highest_average {
-                highest_average = average_sold;
-                best_worker = worker_id;
+            if average_sold > best_average {
+                best_average = average_sold;
+                best_worker = id;
             }
         }
 
+        // Print the most important information for each day
         println!("------------------------------------------FINAL STATS-------------------------------------------");
         println!("{} days went by", self.stats.len());
 
@@ -153,12 +145,12 @@ impl Bakery {
 
         println!(
             "Best business day was: day {} with {} portions sold",
-            best_day_index + 1, // Adding 1 to display as a 1-based day number
-            max_portions_sold
+            best_day_index + 1,
+            most_portions_sold
         );
         println!(
-            "Best worker was: worker {} with an average of {} portions sold per day.",
-            best_worker, highest_average
+            "Best worker was: worker {} with an average of {} portions sold per day",
+            best_worker, best_average
         );
     }
 }
@@ -190,7 +182,7 @@ struct Worker {
 
 impl Worker {
     fn new(id: usize) -> Self {
-        let prioritize = !(id == 0 || id == 1); // workers 0 and 1 prioritize regular customers unlike the rest
+        let prioritize = !(id == 0 || id == 1); // Workers 0 and 1 prioritize regular customers unlike the rest
 
         Self {
             id,
@@ -205,9 +197,8 @@ impl Worker {
         customer_queues: Arc<(Mutex<CustomerQueues>, Condvar)>,
     ) -> Option<Client> {
         let (queues_lock, cvar) = &*customer_queues;
-        // Lock the customer queues
         let mut queues = queues_lock.lock().unwrap();
-        // Wait until there is a client in either queue
+        // Wait until there is a client to serve in either queue
         while *is_open.read().unwrap()
             && queues.priority_queue.is_empty()
             && queues.regular_queue.is_empty()
@@ -216,14 +207,14 @@ impl Worker {
         }
 
         if self.prioritize {
-            // Serve a priority client if available, otherwise serve a regular client
+            // Prioritize serving a priority customer over a regular one
             if let Some(client) = queues.priority_queue.pop_front() {
                 Some(client)
             } else {
                 queues.regular_queue.pop_front()
             }
         } else {
-            // Serve a regular client if available, otherwise serve a priority client
+            // Prioritize serving a regular customer over a priority one
             if let Some(client) = queues.regular_queue.pop_front() {
                 Some(client)
             } else {
@@ -249,6 +240,7 @@ impl Worker {
         };
         let reset = "\x1b[0m";
 
+        // The worker announces the type of clients it prioritizes before beginning service
         if self.prioritize {
             println!(
                 "{}Worker {} prioritizes priority customers over regular customers{}",
@@ -274,43 +266,40 @@ impl Worker {
                 let mut full_cakes = ordered_portions / 6;
                 let mut individual_portions = ordered_portions % 6;
                 let service_time = full_cakes + individual_portions;
-                let service_duration = Duration::from_secs((service_time).try_into().unwrap());
                 {
                     /*
-                     * lets start by verifying that we can fulfill the client's order
-                     * we try to get the first 3 cakes, since the max order are 3 cakes.
-                     * if we dont have 3 cakes left, we get the number of portions for the remainder
-                     */
+                    Before messing with the cake tray, we want to verify that we can actually fulfill the client's order.
+                    Since the cake in front is the one that is likely to be incomplete, we try to get the last 3 cakes, since the max order are 3 cakes.
+                    If we don't have 3 cakes left, we get the number of portions for the available ones, check if there's enough to serve the client.
+                    */
                     let mut cakes = cakes.lock().unwrap();
-                    let (slice1, slice2) = cakes.as_slices();
-                    let total_elements = slice1.len() + slice2.len();
-                    let available_portions: usize = if total_elements >= 3 {
-                        // Sum the first 3 elements across slice1 and slice2
-                        slice1.iter().chain(slice2.iter()).take(3).sum()
+                    let (slice1, slice2) = cakes.as_slices(); // Some elements wrap around so must divide by slices to get them in order
+                    let available_portions: usize = if slice1.len() + slice2.len() >= 3 {
+                        // Sum of the portions of the last 3 cakes in the queue (across both slices)
+                        slice1.iter().chain(slice2.iter()).rev().take(3).sum()
                     } else {
-                        // Sum all available elements if fewer than 3
+                        // Less than 3 cakes in queue -> Sum the portions of all cakes left
                         slice1.iter().chain(slice2.iter()).sum()
                     };
 
                     if available_portions < ordered_portions {
-                        // go to the next customer, as we don't have enough cake for the current one
+                        // Go fetch another customer in queue, as we don't have enough cake to serve the current one
                         println!("{}Cannot serve client {} | Requested {} portions, only {} are available{}", color, client.id, ordered_portions, available_portions, reset);
                         continue;
                     } else {
                         println!(
-                                "{}Worker {} takes {} seconds to serve {} pieces of cake to client {}{}",
+                                "{}Worker {} takes {} minutes to serve {} pieces of cake to client {}{}",
                                 color, self.id, service_time, ordered_portions, client.id, reset
                             );
 
-                        // lets start by removing as many complete cakes as possible
-                        // this is done to save the clients time
+                        // Firstly, serve as many whole cakes as possible
                         while full_cakes > 0 {
                             cakes.pop_back();
                             full_cakes -= 1;
                         }
 
                         if let Some(&prev_front_cake) = cakes.front() {
-                            //now that we got the complete cakes, we get the remaining pieces
+                            // Secondly, serve the remaining portions
                             while individual_portions > 0 {
                                 if let Some(cake) = cakes.front_mut() {
                                     if *cake <= individual_portions {
@@ -323,6 +312,7 @@ impl Worker {
                                 }
                             }
 
+                            // Just logging the state of the cake stack/queue before and after the service
                             if let Some(current_front_cake) = cakes.front() {
                                 println!(
                                         "{}Previous cake on top of stack was |{}|; After service, current cake on top of stack is |{}| and there are {} cakes in stack{}",
@@ -338,6 +328,7 @@ impl Worker {
                     }
                 }
                 self.portions_sold += ordered_portions;
+                let service_duration = Duration::from_secs((service_time).try_into().unwrap());
                 thread::sleep(service_duration);
             }
         }
@@ -351,18 +342,20 @@ impl Worker {
 
 fn cake_production(is_morning: Arc<RwLock<bool>>, cakes: Arc<Mutex<VecDeque<usize>>>) {
     while *is_morning.read().unwrap() {
-        // Simulate producing one cake with a delay
+        // Producing each cake with takes 400 ms
         thread::sleep(Duration::from_millis(400));
         let mut cakes = cakes.lock().unwrap();
-        cakes.push_back(6); // Each cake starts with 6 portions
+        cakes.push_back(6); // Every cake has 6 portions initially
     }
-    // Afternoon production: reset with a fixed number of cakes
+
+    // Afternoon behavior: fixed number of cakes (50) is added to the morning leftovers
     let n_cakes = {
         let mut cakes = cakes.lock().unwrap();
         println!(
             "Done producing cakes for today. Have {} cakes from the morning in stack",
             cakes.len()
         );
+
         let mut afternoon_cakes: VecDeque<usize> = VecDeque::from(vec![6; 50]);
         cakes.append(&mut afternoon_cakes);
         cakes.len()
@@ -400,6 +393,7 @@ fn customer_arrival(
             cvar.notify_one();
         }
         id += 1;
+        // Arrival of customers is a normal distribution, take on average about 1 second
         let normal = Normal::new(1.0, 0.1).unwrap();
         let arrival_time = (normal.sample(&mut rand::thread_rng())).to_u64().unwrap();
         thread::sleep(Duration::from_secs(arrival_time));
@@ -408,14 +402,14 @@ fn customer_arrival(
 }
 
 fn day_time_logic(is_open: Arc<RwLock<bool>>, is_morning: Arc<RwLock<bool>>) {
-    // Start the timer thread for "10 hours" (60 seconds for testing)
-    thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration
+    // Start the timer thread for "10 hours" (60 seconds for simulation)
+    thread::sleep(Duration::from_secs(30));
     {
         let mut is_morning = is_morning.write().unwrap();
-        *is_morning = false; // now it's afternoon
+        *is_morning = false;
         println!("5 hours have passed. It is the afternoon.");
     }
-    thread::sleep(Duration::from_secs(30)); // Simulate 5 hours with a shorter duration, for a total of 10 hours
+    thread::sleep(Duration::from_secs(30));
     let mut is_open = is_open.write().unwrap();
     *is_open = false;
     println!("10 hours have passed. Closing the bakery for the day.");
@@ -441,8 +435,8 @@ fn main() {
             Condvar::new(),
         ));
 
-        let mut cake_deque = VecDeque::with_capacity(100);
         // Bakery opens with 20 cakes already available
+        let mut cake_deque = VecDeque::with_capacity(100);
         for _ in 0..20 {
             cake_deque.push_back(6);
         }
@@ -450,31 +444,35 @@ fn main() {
 
         println!("------------------------------------------START OF DAY {}-------------------------------------------", day);
 
-        // Reset the "open" flag at the beginning of each day
+        // Reset the "is_open" and "is_morning" flag at the beginning of each day
         let is_open = Arc::new(RwLock::new(true));
         let is_morning = Arc::new(RwLock::new(true));
 
         let is_open_timer = Arc::clone(&is_open);
         let is_morning_timer = Arc::clone(&is_morning);
-        
-        thread::spawn(move || {
+        let time_handle = thread::spawn(move || {
+            // Time passes by in the background, other threads check for time
             day_time_logic(is_open_timer, is_morning_timer);
         });
 
         let cakes_clone = Arc::clone(&cakes);
         let production_handle = thread::spawn(move || {
+            // Cake production takes place in the background
             cake_production(is_morning, cakes_clone);
         });
 
         let is_open_clone = Arc::clone(&is_open);
         let customer_queues_clone = Arc::clone(&customer_queues);
         let customer_handle = thread::spawn(move || {
+            // Customer arrival takes place in the background
             customer_arrival(is_open_clone, customer_queues_clone);
         });
 
-        // Start the bakery thread for the day
+        // The bakery starts operating for the day
         bakery.operate(is_open, customer_queues, cakes);
 
+        // Join on all threads (aside from workers, that's the bakery's business)
+        time_handle.join().unwrap();
         production_handle.join().unwrap();
         customer_handle.join().unwrap();
 
@@ -482,5 +480,6 @@ fn main() {
         println!("------------------------------------------END OF DAY {}-------------------------------------------\n", day);
         thread::sleep(Duration::from_secs(2));
     }
+    // At the end of the simulation, calculate and print the stats across the days that passed
     bakery.general_stats();
 }
