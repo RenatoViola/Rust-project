@@ -342,7 +342,7 @@ impl Worker {
 
 fn cake_production(is_morning: Arc<RwLock<bool>>, cakes: Arc<Mutex<VecDeque<usize>>>) {
     while *is_morning.read().unwrap() {
-        // Producing each cake with takes 400 ms
+        // Producing each cake takes 400 ms
         thread::sleep(Duration::from_millis(400));
         let mut cakes = cakes.lock().unwrap();
         cakes.push_back(6); // Every cake has 6 portions initially
